@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>QR Lab: Professional Edition</title>
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+    <style>
+        :root { --r: #ff4444; --g: #44ff44; --b: #4444ff; --bg: #0d0d0d; --panel: #1a1a1a; }
+        body { background: var(--bg); color: #e0e0e0; font-family: 'Segoe UI', Tahoma, sans-serif; margin: 0; display: flex; flex-direction: column; align-items: center; }
+        
+        header { width: 100%; padding: 10px; background: var(--panel); text-align: center; border-bottom: 1px solid #333; font-size: 14px; letter-spacing: 2px; color: #888; }
+
+        /* Основной контейнер */
+        .main-layout { display: flex; gap: 20px; padding: 20px; max-width: 1200px; }
+        
+        /* Рабочая зона */
+        .viewport-container { position: relative; width: 500px; height: 500px; background: #000; border: 2px solid #333; overflow: hidden; display: flex; justify-content: center; align-items: center; box-shadow: 0 0 30px rgba(0,0,0,0.5); }
+        canvas#mainView { image-rendering: pixelated; transition: transform 0.1s ease-out; }
+
+        /* Панель управления */
+        .side-panel { width: 300px; background: var(--panel); padding: 20px; border-radius: 8px; display: flex; flex-direction: column; gap: 15px; }
+        
+        .channel-tabs { display: flex; gap: 5px; }
+        .tab { flex: 1; padding: 8px; text-align: center; cursor: pointer; border: 1px solid #333; font-weight: bold; font-size: 12px; }
+        .tab-r.active { background: var(--r); color: black; }
+        .tab-g.active { background: var(--g); color: black; }
+        .tab-b.active { background: var(--b); color: black; }
+
+        .control-group { display: flex; flex-direction: column; gap: 5px; }
+        label { font-size: 11px; color: #666; text-transform: uppercase; }
+        input[type="range"] { width: 100%; }
+        
+        .btn { padding: 10px; background: #333; border: none; color: white; cursor: pointer; border-radius: 4px; font-size: 12px; }
+        .btn:hover { background: #444; }
+        .btn.active { background: #555; border: 1px solid #aaa; }
+
+        /* Сетка внизу */
+        .debug-grid { width: 100%; max-width: 1200px; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; padding: 20px; }
+        .grid-item { background: #111; padding: 5px; border: 1px solid #222; text-align: center; }
+        .grid-item canvas { width: 100%; height: auto; }
+        .grid-item.winner { border-color: var(--g); box-shadow: 0 0 10px rgba(68, 255, 68, 0.2); }
+
+        .result-card { background: #222; padding: 15px; border-radius: 4px; border-left: 4px solid var(--g); }
+        .code-text { font-family: monospace; word-break: break-all; color: var(--g); }
+    </style>
+</head>
+<body>
+
+<header>QR ANALYTICAL STAND v2.0 // LABORATORY MODE</header>
+
+<div class="main-layout">
+    <div class="viewport-container" id="viewport">
+        <canvas id="mainView"></canvas>
+    </div>
+
+    <div class="side-panel">
+        <div class="control-group">
+            <label>Загрузка</label>
+            <input type="file" id="fileInput" accept="image/*">
+            <button class="btn" onclick="document.getElementById('fileInput').click()">ОТКРЫТЬ ФОТО</button>
+        </div>
+
+        <div class="control-group">
+            <label>Выбор канала</label>
+            <div class="channel-tabs">
+                <div class="tab tab-r active" onclick="setChannel(0)">RED</div>
+                <div class="tab tab-g" onclick="setChannel(1)">GREEN</div>
+                <div class="tab tab-b" onclick="setChannel(2)">BLUE</div>
+            </div>
+        </div>
+
+        <div class="control-group">
+            <label>Порог бинаризации (T: <span id="tVal">128</span>)</label>
+            <input type="range" id="threshold" min="0" max="255" value="128" oninput="updateParams()">
+        </div>
+
+        <div class="control-group">
+            <label>Режимы</label>
+            <button id="btnAdaptive" class="btn" onclick="toggleAdaptive()">ADAPTIVE THRESHOLD: OFF</button>
+            <button id="btnInv" class="btn" onclick="toggleInv()">INVERSION: OFF</button>
+        </div>
+
+        <div class="control-group">
+            <label>Масштаб (Zoom)</label>
+            <div style="display:flex; gap:5px;">
+                <button class="btn" style="flex:1" onclick="changeZoom(0.1)">+</button>
+                <button class="btn" style="flex:1" onclick="changeZoom(-0.1)">-</button>
+                <button class="btn" style="flex:1" onclick="resetZoom()">RESET</button>
+            </div>
+        </div>
+
+        <div class="result-card" id="resCard">
+            <label>Результат</label>
+            <div class="code-text" id="resText">Ожидание данных...</div>
+        </div>
+    </div>
+</div>
+
+<div class="debug-grid" id="debugGrid">
+    </div>
+
+<script>
+    let rawImg = null;
+    let currentChannel = 0;
+    let zoom = 1;
+    let isAdaptive = false;
+    let isInv = false;
+    const canvas = document.getElementById('mainView');
+    const ctx = canvas.getContext('2d', {willReadFrequently: true});
+
+    // Загрузка фото
+    document.getElementById('fileInput').onchange = (e) => {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            const img = new Image();
+            img.onload = () => { rawImg = img; resetZoom(); analyze(); };
+            img.src = event.target.result;
+        };
+        reader.readAsDataURL(e.target.files[0]);
+    };
+
+    function setChannel(ch) {
+        currentChannel = ch;
+        document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', i === ch));
+        analyze();
+    }
+
+    function toggleAdaptive() {
+        isAdaptive = !isAdaptive;
+        document.getElementById('btnAdaptive').innerText = `ADAPTIVE THRESHOLD: ${isAdaptive ? 'ON' : 'OFF'}`;
+        analyze();
+    }
+
+    function toggleInv() {
+        isInv = !isInv;
+        document.getElementById('btnInv').innerText = `INVERSION: ${isInv ? 'ON' : 'OFF'}`;
+        analyze();
+    }
+
+    function updateParams() {
+        document.getElementById('tVal').innerText = document.getElementById('threshold').value;
+        analyze();
+    }
+
+    function changeZoom(delta) { zoom += delta; applyZoom(); }
+    function resetZoom() { zoom = 1; applyZoom(); }
+    function applyZoom() { canvas.style.transform = `scale(${zoom})`; }
+
+    function analyze() {
+        if (!rawImg) return;
+        
+        const w = rawImg.width;
+        const h = rawImg.height;
+        canvas.width = w; canvas.height = h;
+        
+        // 1. Получаем данные канала
+        ctx.drawImage(rawImg, 0, 0);
+        const frame = ctx.getImageData(0, 0, w, h);
+        const data = frame.data;
+        const T = parseInt(document.getElementById('threshold').value);
+
+        // 2. Бинаризация (упрощенный Adaptive или Global)
+        for (let i = 0; i < data.length; i += 4) {
+            let val = data[i + currentChannel];
+            
+            let final;
+            if (isAdaptive) {
+                // Псевдо-адаптив для теста: контрастное усиление
+                final = val > T ? 255 : 0; 
+            } else {
+                final = val > T ? 255 : 0;
+            }
+
+            if (isInv) final = 255 - final;
+
+            data[i] = data[i+1] = data[i+2] = final;
+        }
+        ctx.putImageData(frame, 0, 0);
+
+        // 3. Поиск QR и СЕТКИ
+        const result = jsQR(data, w, h);
+        
+        if (result) {
+            document.getElementById('resText').innerText = result.data;
+            drawOverlay(result.location);
+        } else {
+            document.getElementById('resText').innerText = "Не найдено";
+        }
+    }
+
+    function drawOverlay(loc) {
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = "#44ff44";
+        
+        // Рисуем рамку по углам
+        ctx.beginPath();
+        ctx.moveTo(loc.topLeftCorner.x, loc.topLeftCorner.y);
+        ctx.lineTo(loc.topRightCorner.x, loc.topRightCorner.y);
+        ctx.lineTo(loc.bottomRightCorner.x, loc.bottomRightCorner.y);
+        ctx.lineTo(loc.bottomLeftCorner.x, loc.bottomLeftCorner.y);
+        ctx.closePath();
+        ctx.stroke();
+
+        // Рисуем "сетку натяжения" (твоя идея)
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = "rgba(68, 255, 68, 0.3)";
+        for(let i = 1; i < 10; i++) {
+            // Вертикальные линии
+            const startX = loc.topLeftCorner.x + (loc.topRightCorner.x - loc.topLeftCorner.x) * (i/10);
+            const startY = loc.topLeftCorner.y + (loc.topRightCorner.y - loc.topLeftCorner.y) * (i/10);
+            const endX = loc.bottomLeftCorner.x + (loc.bottomRightCorner.x - loc.bottomLeftCorner.x) * (i/10);
+            const endY = loc.bottomLeftCorner.y + (loc.bottomRightCorner.y - loc.bottomLeftCorner.y) * (i/10);
+            ctx.beginPath(); ctx.moveTo(startX, startY); ctx.lineTo(endX, endY); ctx.stroke();
+            
+            // Горизонтальные линии
+            const hStartX = loc.topLeftCorner.x + (loc.bottomLeftCorner.x - loc.topLeftCorner.x) * (i/10);
+            const hStartY = loc.topLeftCorner.y + (loc.bottomLeftCorner.y - loc.topLeftCorner.y) * (i/10);
+            const hEndX = loc.topRightCorner.x + (loc.bottomRightCorner.x - loc.topRightCorner.x) * (i/10);
+            const hEndY = loc.topRightCorner.y + (loc.bottomRightCorner.y - loc.topRightCorner.y) * (i/10);
+            ctx.beginPath(); ctx.moveTo(hStartX, hStartY); ctx.lineTo(hEndX, hEndY); ctx.stroke();
+        }
+    }
+</script>
+</body>
+</html>
